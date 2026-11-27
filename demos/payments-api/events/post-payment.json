@@ -1,0 +1,12 @@
+{
+  "version": "2.0",
+  "rawPath": "/payments",
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/payments"
+    }
+  },
+  "body": "{\"amount\":499,\"currency\":\"INR\",\"paymentMethodToken\":\"pm_test_visa\"}",
+  "isBase64Encoded": false
+}

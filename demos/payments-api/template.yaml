@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Reading copy of the sample-payments HTTP API.
+  Create the demo in the AWS console using SETUP.md.
+  Do not upload this file to create the demo.
+
+# CloudFormation saves Code.ZipFile as index.py, so Handler is index.handler.
+# In the Lambda console the file is lambda_function.py, so the handler setting
+# is lambda_function.lambda_handler. The Python source is the same file.
+
+Resources:
+  PaymentsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sample-payments-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  PaymentsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: sample-payments
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt PaymentsRole.Arn
+      Timeout: 3
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import uuid
+
+          CARD_FIELDS = {"cardnumber", "pan", "cvv", "cvc"}
+          CURRENCIES = {"INR", "USD"}
+
+
+          def lambda_handler(event, context):
+              method = (event.get("requestContext") or {}).get("http", {}).get("method", "")
+              path = event.get("rawPath") or ""
+              params = event.get("pathParameters") or {}
+
+              if method == "GET" and path == "/health":
+                  return _respond(200, {"status": "ok"})
+
+              if method == "POST" and path == "/payments":
+                  body, error = _payment_request(event)
+                  if error:
+                      return _respond(400, {"message": error})
+                  payment_id = str(uuid.uuid4())
+                  print("authorized", payment_id)
+                  return _respond(
+                      201,
+                      {
+                          "paymentId": payment_id,
+                          "status": "AUTHORIZED",
+                          "amount": body["amount"],
+                          "currency": body["currency"],
+                      },
+                  )
+
+              payment_id = params.get("paymentId")
+              if method == "GET" and payment_id and path == f"/payments/{payment_id}":
+                  print("read", payment_id)
+                  return _respond(200, {"paymentId": payment_id, "status": "AUTHORIZED"})
+
+              if method == "POST" and payment_id and path == f"/payments/{payment_id}/capture":
+                  print("captured", payment_id)
+                  return _respond(200, {"paymentId": payment_id, "status": "CAPTURED"})
+
+              return _respond(404, {"message": "Not found"})
+
+
+          def _payment_request(event):
+              if event.get("isBase64Encoded"):
+                  return None, "Request body must be JSON"
+              raw = event.get("body") or ""
+              try:
+                  body = json.loads(raw) if raw else {}
+              except json.JSONDecodeError:
+                  return None, "Request body must be JSON"
+              if not isinstance(body, dict):
+                  return None, "Request body must be a JSON object"
+
+              lowered = {str(key).lower() for key in body}
+              if lowered & CARD_FIELDS:
+                  return None, "Do not send card numbers or a CVV"
+
+              missing = [
+                  name
+                  for name in ("amount", "currency", "paymentMethodToken")
+                  if name not in body or body[name] in ("", None)
+              ]
+              if missing:
+                  return None, "Missing " + ", ".join(missing)
+
+              try:
+                  amount = float(body["amount"])
+              except (TypeError, ValueError):
+                  return None, "amount must be a positive number"
+              if amount <= 0:
+                  return None, "amount must be a positive number"
+
+              currency = str(body["currency"]).upper()
+              if currency not in CURRENCIES:
+                  return None, "currency must be INR or USD"
+
+              token = str(body["paymentMethodToken"]).strip()
+              if not token:
+                  return None, "paymentMethodToken is required"
+
+              return {"amount": amount, "currency": currency}, None
+
+
+          def _respond(status, payload):
+              return {
+                  "statusCode": status,
+                  "headers": {"content-type": "application/json"},
+                  "body": json.dumps(payload),
+              }
+
+  PaymentsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: sample-payments-api
+      ProtocolType: HTTP
+
+  PaymentsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref PaymentsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PaymentsFunction.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PaymentsApi
+      RouteKey: GET /health
+      Target: !Sub integrations/${PaymentsIntegration}
+
+  AuthorizeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PaymentsApi
+      RouteKey: POST /payments
+      Target: !Sub integrations/${PaymentsIntegration}
+
+  GetPaymentRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PaymentsApi
+      RouteKey: "GET /payments/{paymentId}"
+      Target: !Sub integrations/${PaymentsIntegration}
+
+  CaptureRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PaymentsApi
+      RouteKey: "POST /payments/{paymentId}/capture"
+      Target: !Sub integrations/${PaymentsIntegration}
+
+  PaymentsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref PaymentsApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  PaymentsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PaymentsFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PaymentsApi}/*/*
+
+Outputs:
+  ApiUrl:
+    Description: Invoke URL for the $default stage
+    Value: !Sub https://${PaymentsApi}.execute-api.${AWS::Region}.amazonaws.com
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref PaymentsFunction

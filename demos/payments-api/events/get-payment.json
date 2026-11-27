@@ -1,0 +1,14 @@
+{
+  "version": "2.0",
+  "rawPath": "/payments/pay-demo-1001",
+  "pathParameters": {
+    "paymentId": "pay-demo-1001"
+  },
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/payments/pay-demo-1001"
+    }
+  },
+  "isBase64Encoded": false
+}
